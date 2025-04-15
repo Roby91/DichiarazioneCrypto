@@ -1,0 +1,11 @@
+version: "3.8"
+
+services:
+  dichiarazionecrypto:
+    build: .
+    container_name: dichiarazionecrypto
+    # Monta la cartella locale su /app (facoltativo)
+    volumes:
+      - ./:/app
+    # Comando di default
+    command: ["python", "src/main.py", "--help"]
