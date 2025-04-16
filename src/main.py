@@ -27,7 +27,14 @@ def main():
 
     # Esegui la logica principale
     data = rules.parse_movements(args.file)
+
+    print("\n\n\n▶ Primi 10 movimenti letti:")
+
+    rules.print_formatted_table(data)
+
     results = rules.calculate_taxes(data)
+
+    print("\n\n\n▶ Risultati calcolo:", results)
 
     # Genera un report
     if args.output:

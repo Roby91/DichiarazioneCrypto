@@ -1,4 +1,4 @@
 def print_banner():
-    print("\n========================")
+    print("\n\n\n========================")
     print("  DichiarazioneCrypto  ")
     print("========================\n")
