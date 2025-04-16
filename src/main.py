@@ -29,8 +29,14 @@ def main():
     data = rules.parse_movements(args.file)
 
     print("\n\n\n▶ Primi 10 movimenti letti:")
-
     rules.print_formatted_table(data)
+
+    assets = rules.get_assets(data)
+    print("\n\n\n▶ Asset trovati:", assets)
+
+    daily_asset_balances = rules.get_daily_asset_balances(data)
+    print("\n\n\n▶ Saldo giornaliero per asset:")
+    rules.print_daily_asset_balances(daily_asset_balances)
 
     results = rules.calculate_taxes(data)
 

@@ -12,7 +12,7 @@ Questo strumento è capace di elaborare gli **estratti conto degli exchange** - 
 
 - 🧮 **Calcolo automatico** di plusvalenze, giacenze medie e altri dati richiesti per ISEE e Modello 730.
 
-- 📁 **Gestione ordinata per anno fiscale** secondo le regole vigenti (es. `/fiscal_years/2025/`, `/fiscal_years/2026/`, ecc).
+- 📁 **Gestione ordinata per anno fiscale** secondo le regole vigenti (es. `/fiscal_years/2024/`, `/fiscal_years/2025/`, ecc).
 
 - 🐳 **Utilizzo tramite Docker**, per facilitare l'esecuzione su qualsiasi sistema senza configurazioni complicate.
 
@@ -29,7 +29,7 @@ Questo strumento è capace di elaborare gli **estratti conto degli exchange** - 
 ```bash
 docker run --rm -v $(pwd):/data dichiarazionecrypto \
   --anno 2025 \
-  --file /data/movimenti_coinbase.csv \
+  --file /data/movimenti_coinbase_2024.csv \
   --output /data/report_fiscale_2025.pdf
 ```
 
@@ -42,7 +42,7 @@ docker run --rm -v $(pwd):/data dichiarazionecrypto \
 ## 🚧 Stato del progetto
 
 Attualmente in fase **early development**.
- Le funzionalità base per l'anno fiscale **2025** sono in fase di definizione.
+Le funzionalità base per l'anno **2025** (riferite ai dati 2024) sono in fase di definizione.
 
 Se vuoi partecipare:
 
@@ -59,7 +59,7 @@ Se vuoi partecipare:
 ## 🤝 Contribuire
 
 **Ogni contributo è benvenuto!**
- Puoi aiutare anche se non sei uno sviluppatore:
+Puoi aiutare anche se non sei uno sviluppatore:
 
 - Segnalando bug o anomalie fiscali
 - Fornendo fonti ufficiali sulle normative
@@ -78,7 +78,7 @@ Il progetto è e **rimarrà gratuito e open source**, per aiutare chiunque abbia
 
 - ⏳ Parsing CSV Coinbase
 
-- ⏳ Calcolo giacenze e plusvalenze (2025)
+- ⏳ Calcolo giacenze e plusvalenze (2025 - riferite ai dati 2024)
 
 - ⏳ Output PDF per supporto 730/ISEE
 
