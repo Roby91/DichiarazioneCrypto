@@ -1,4 +1,5 @@
 import pandas as pd
+from decimal import Decimal, InvalidOperation, getcontext
 from tabulate import tabulate
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
@@ -10,6 +11,9 @@ from reportlab.lib.styles import getSampleStyleSheet
 
 YEAR = 2024 # Anno a cui si riferiscono le transazioni
 
+# — set max precision high enough for all your CSV values —
+getcontext().prec = 50
+
 
 def parse_movements(csv_path):
     """
@@ -18,37 +22,44 @@ def parse_movements(csv_path):
     """
     try:
 
-        # Leggo il file CSV
-        df = pd.read_csv(
-            csv_path,
-            encoding="cp1252",          # o altra codifica corretta
-            parse_dates=["Timestamp"]   # parse automatico delle date
-        )
-
-        # Trasformo la colonna Timestamp in datetime con timezone UTC (se necessario)
-        df["Timestamp"] = pd.to_datetime(df["Timestamp"], utc=True, errors="coerce")
-
-        # Converto le colonne monetarie in float
-        cols_with_euro = [
+        def parse_decimal(x):
+            """Strip out currency symbols/commas and return a Decimal, defaulting to 0."""
+            try:
+                if pd.isna(x):
+                    return Decimal("0")
+                s = str(x).replace("â‚¬", "").replace("€", "").replace(",", "").strip()
+                if s in ("", "-", "-"):
+                    return Decimal("0")
+                return Decimal(s)
+            except InvalidOperation:
+                return Decimal("0")
+            
+        # List of columns that require precise parsing
+        money_cols = [
             "Price at Transaction",
             "Subtotal",
             "Total (inclusive of fees and/or spread)",
             "Fees and/or Spread"
         ]
+        all_decimal_cols = money_cols + ["Quantity Transacted"]
+        converters = {col: parse_decimal for col in all_decimal_cols}
 
-        for col in cols_with_euro:
-            df[col] = (
-                df[col]
-                .astype(str)
-                .str.replace("â‚¬", "", regex=False)
-                .str.replace("€", "", regex=False)
-                .str.replace(",", "", regex=False)
-                .str.strip()
-                .replace(r"^-?$", "0", regex=True)
-                .astype(float)
-            )
+        # Leggo il file CSV
+        df = pd.read_csv(
+            csv_path,
+            encoding="cp1252",           # o altra codifica corretta
+            parse_dates=["Timestamp"],   # parse automatico delle date
+            converters=converters,       # converto le colonne monetarie
+        )
 
-        # Esempio: filtra/rinomina colonne, convalida dati, ecc.
+        # Trasformo la colonna Timestamp in datetime con timezone UTC (se necessario)
+        df["Timestamp"] = pd.to_datetime(df["Timestamp"], utc=True, errors="coerce")
+
+        # TODO: validazione che ogni "Price Currency" sia in EUR
+
+        # riordina per timestamp crescente:
+        df = df.sort_values("Timestamp", ascending=True)
+
         return df
     
     except Exception as e:
@@ -57,10 +68,13 @@ def parse_movements(csv_path):
 def print_formatted_table(dataframe, num_rows=10):
     """
     Stampa il DataFrame in formato tabellare.
+    Stampa *esattamente* ogni Decimal come stringa completa,
+    senza alcuna formattazione in virgola mobile.
     
     :param dataframe: pandas DataFrame da stampare
     :param num_rows: numero di righe da mostrare (default 10)
     """
+
     # Definiamo un sottoinsieme di colonne che vogliamo visualizzare:
     columns_to_print = [
         "Timestamp", 
@@ -71,7 +85,14 @@ def print_formatted_table(dataframe, num_rows=10):
         "Total (inclusive of fees and/or spread)"
     ]
 
-    print(tabulate(dataframe[columns_to_print].head(num_rows), headers='keys', tablefmt='psql', showindex=False))
+    to_print = dataframe[columns_to_print].head(num_rows).copy()
+
+    # Per ogni colonna Decimal, sostituisci l’oggetto con la sua repr testuale
+    for c in ["Quantity Transacted", "Price at Transaction", "Total (inclusive of fees and/or spread)"]:
+        to_print[c] = to_print[c].apply(lambda x: str(x) if isinstance(x, Decimal) else x)
+
+    # Per riuscire a stampare a piena precisione è importante disabilitare il parsing automatico dei numeri (disable_numparse=True)
+    print(tabulate(to_print, headers="keys", tablefmt="psql", disable_numparse=True, showindex=False))
 
 def get_assets(dataframe):
     """
@@ -94,7 +115,13 @@ def get_daily_asset_balances(dataframe):
     df["Quantity Transacted"] = pd.to_numeric(
         df["Quantity Transacted"], errors="coerce"
     )
-    
+
+    # invertiamo le quantità per tutte le transaction types che contengono "sell"
+    sell_mask = df["Transaction Type"].str.lower().str.contains("sell", na=False)
+    df.loc[sell_mask, "Quantity Transacted"] *= -1
+
+    # TODO: vanno gestitie eventuali tipi di transazione al momento non note
+
     # calendario completo dell'anno                                   
     calendar = pd.date_range(f"{YEAR}-01-01", f"{YEAR}-12-31", freq="D", tz="UTC")
     
@@ -144,14 +171,15 @@ def generate_report(results: dict[str, pd.Series],
     :param df_tx:    DataFrame originale delle transazioni (necessario per i prezzi)
     :param output_path: path del file PDF in uscita
     """
-    # Prepariamo lo “Story” Platypus
+    # Prepariamo lo "Story" Platypus
     doc   = SimpleDocTemplate(output_path, pagesize=A4)
     story = []
     styles = getSampleStyleSheet()
     h1, h2, normal = styles["Heading1"], styles["Heading2"], styles["BodyText"]
 
     # === HEADER generale ====================================================
-    story.append(Paragraph(f"REPORT FISCALE CRYPTO - Anno {YEAR + 1}", h1))
+    story.append(Paragraph(f"REPORT FISCALE CRYPTO {YEAR + 1}", h1))
+    story.append(Paragraph(f"Riferito alle attività del {YEAR}", h2))
     story.append(Spacer(1, 12))
 
     # contieni i riepiloghi finali
@@ -170,12 +198,18 @@ def generate_report(results: dict[str, pd.Series],
                 last_price = pd.to_numeric(sel, errors="coerce").dropna().iloc[-1]
 
         # ------- tabella giornaliera (mostriamo solo le prime/ultime 10 righe)
+        #df_bal = serie.to_frame(name="Qty").reset_index(names="Date")
+        #df_bal["Date"] = df_bal["Date"].dt.strftime("%Y-%m-%d")
+        #top   = df_bal.head(10).values.tolist()
+        #bottom = df_bal.tail(10).values.tolist()
+        #table_data = top + [["...", "..."]] + bottom
+        #story.append(_make_table(table_data, ["Data", "Quantità"]))
+        #story.append(Spacer(1, 6))
+
+        # ------- tabella giornaliera completa (per ogni giorno dell'anno)
         df_bal = serie.to_frame(name="Qty").reset_index(names="Date")
         df_bal["Date"] = df_bal["Date"].dt.strftime("%Y-%m-%d")
-        top   = df_bal.head(10).values.tolist()
-        bottom = df_bal.tail(10).values.tolist()
-        table_data = top + [["...", "..."]] + bottom
-        story.append(_make_table(table_data, ["Data", "Quantità"]))
+        story.append(_make_table(df_bal.values.tolist(), ["Data", "Quantità"]))
         story.append(Spacer(1, 6))
 
         # ------- metriche di sintesi

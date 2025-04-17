@@ -76,13 +76,15 @@ Il progetto è e **rimarrà gratuito e open source**, per aiutare chiunque abbia
 
 - ✅ Struttura base del progetto per anno fiscale
 
-- ⏳ Parsing CSV Coinbase
+- ✅ Parsing CSV Coinbase
 
 - ⏳ Calcolo giacenze e plusvalenze (2025 - riferite ai dati 2024)
 
 - ⏳ Output PDF per supporto 730/ISEE
 
 - ⏳ Dockerfile stabile
+
+- ⏳ Esempio report PDF
 
 - 🕐 GUI multipiattaforma (fase successiva)
 
