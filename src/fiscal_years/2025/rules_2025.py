@@ -1,7 +1,15 @@
 import pandas as pd
 from tabulate import tabulate
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+)
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet
+
 
 YEAR = 2024 # Anno a cui si riferiscono le transazioni
+
 
 def parse_movements(csv_path):
     """
@@ -46,7 +54,6 @@ def parse_movements(csv_path):
     except Exception as e:
         raise ValueError(f"Errore nella lettura del file CSV: {e}")
 
-# Funzione per stampare il DataFrame in maniera formattata
 def print_formatted_table(dataframe, num_rows=10):
     """
     Stampa il DataFrame in formato tabellare.
@@ -125,11 +132,111 @@ def calculate_taxes(df):
     # ... logica di calcolo ...
     return results
 
-def generate_report(results, output_path=f"report_crypto_{YEAR}.pdf"):
+def generate_report(results: dict[str, pd.Series],
+                    df_tx: pd.DataFrame | None = None,
+                    output_path: str = f"report_crypto_{YEAR + 1}.pdf"):
     """
-    Genera un report PDF/HTML/etc. con i risultati di calcolo.
+    Crea un PDF con:
+      • saldo giorno-per-giorno di ogni asset
+      • giacenza media annua
+      • plusvalenza stimata
+    :param results:  dict {asset: Serie (index=datetime, values=quantità)}
+    :param df_tx:    DataFrame originale delle transazioni (necessario per i prezzi)
+    :param output_path: path del file PDF in uscita
     """
-    with open(output_path, "w") as f:
-        f.write(f"=== REPORT FISCALE {YEAR} ===\n")
-        for k, v in results.items():
-            f.write(f"{k}: {v}\n")
+    # Prepariamo lo “Story” Platypus
+    doc   = SimpleDocTemplate(output_path, pagesize=A4)
+    story = []
+    styles = getSampleStyleSheet()
+    h1, h2, normal = styles["Heading1"], styles["Heading2"], styles["BodyText"]
+
+    # === HEADER generale ====================================================
+    story.append(Paragraph(f"REPORT FISCALE CRYPTO - Anno {YEAR + 1}", h1))
+    story.append(Spacer(1, 12))
+
+    # contieni i riepiloghi finali
+    summary_rows = []
+
+    # === UN CAPITOLO PER OGNI ASSET =========================================
+    for asset, serie in results.items():
+        story.append(Paragraph(asset, h2))
+
+        # ------- ricavo l'ultimo prezzo disponibile dall'eventuale DataFrame
+        last_price = None
+        if df_tx is not None:
+            sel = df_tx.loc[df_tx["Asset"] == asset, "Price at Transaction"]
+            if not sel.empty:
+                # to_numeric nel dubbio + prendo l'ultimo valore non‑NaN
+                last_price = pd.to_numeric(sel, errors="coerce").dropna().iloc[-1]
+
+        # ------- tabella giornaliera (mostriamo solo le prime/ultime 10 righe)
+        df_bal = serie.to_frame(name="Qty").reset_index(names="Date")
+        df_bal["Date"] = df_bal["Date"].dt.strftime("%Y-%m-%d")
+        top   = df_bal.head(10).values.tolist()
+        bottom = df_bal.tail(10).values.tolist()
+        table_data = top + [["...", "..."]] + bottom
+        story.append(_make_table(table_data, ["Data", "Quantità"]))
+        story.append(Spacer(1, 6))
+
+        # ------- metriche di sintesi
+        avg_bal, gain_eur = _compute_summary(serie, last_price)
+        story.append(Paragraph(
+            f"Giacenza media annua: <b>{avg_bal:,.8f} {asset}</b>", normal))
+        if last_price is not None:
+            story.append(Paragraph(
+                f"Plusvalenza stimata: <b>{gain_eur:,.2f} €</b>", normal))
+        else:
+            story.append(Paragraph(
+                "Plusvalenza stimata: <i>prezzo mancante - non calcolata</i>", normal))
+        story.append(Spacer(1, 12))
+
+        # arricchiamo il riepilogo finale
+        summary_rows.append([asset,
+                             f"{avg_bal:,.8f}",
+                             f"{gain_eur:,.2f}" if last_price is not None else "n/d"])
+
+        story.append(PageBreak())
+
+    # === RIEPILOGO FINALE ===================================================
+    story.append(Paragraph("Riepilogo annuale", h2))
+    story.append(_make_table(summary_rows,
+                             ["Asset", "Giacenza media", "Plusvalenza (€)"],
+                             h_align="CENTER"))
+    story.append(Spacer(1, 12))
+    story.append(Paragraph(
+        "NB: la plusvalenza è calcolata come differenza di quantità "
+        "tra 1 gennaio e 31 dicembre moltiplicata per l'ultimo prezzo disponibile "
+        "nel file CSV. Se desideri il calcolo FIFO/LIFO delle plusvalenze realizzate, "
+        "occorre un'analisi più approfondita delle singole operazioni di vendita.", normal))
+
+    # === BUILD ==============================================================
+    doc.build(story)
+    print(f"Report generato in: {output_path}")
+
+
+
+
+def _compute_summary(series: pd.Series, last_price: float | None) -> tuple[float, float]:
+    """
+    Ritorna (giacenza_media, plusvalenza_eur).
+    La plusvalenza è calcolata come (q_finale - q_iniziale) * last_price.
+    """
+    avg_balance = series.mean()                                          # media annua
+    if last_price is None:
+        gain_eur = float("nan")  # se manca il prezzo non possiamo stimare in €
+    else:
+        gain_eur = (series.iloc[-1] - series.iloc[0]) * last_price
+    return avg_balance, gain_eur
+
+def _make_table(data, col_names, h_align="LEFT"):
+    """
+    Rende più leggibile la creazione di tabelle Platypus.
+    """
+    tbl = Table([col_names] + data, repeatRows=1)
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+        ("GRID",       (0, 0), (-1, -1), 0.25, colors.grey),
+        ("ALIGN",      (0, 0), (-1, -1), h_align),
+        ("FONTNAME",   (0, 0), (-1, 0), "Helvetica-Bold")
+    ]))
+    return tbl

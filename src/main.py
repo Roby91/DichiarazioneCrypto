@@ -5,7 +5,7 @@ from fiscal_years.utils import get_rules_module
 
 def main():
     parser = argparse.ArgumentParser(
-        description="DichiarazioneCrypto – Calcolo ai fini fiscali (730, ISEE) da movimenti crypto."
+        description="DichiarazioneCrypto - Calcolo ai fini fiscali (730, ISEE) da movimenti crypto."
     )
     parser.add_argument("--anno", type=str, required=False, default="2025",
                         help="Anno fiscale di riferimento (default: 2025)")
@@ -44,7 +44,8 @@ def main():
 
     # Genera un report
     if args.output:
-        rules.generate_report(results, output_path=args.output)
+        #rules.generate_report(results, daily_asset_balances, output_path=args.output)
+        rules.generate_report(daily_asset_balances, None, output_path=args.output)
         print(f"✅ Report generato: {args.output}")
     else:
         print("▶ Risultati calcolo:", results)
