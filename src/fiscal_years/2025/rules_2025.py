@@ -1,3 +1,4 @@
+import datetime
 import pandas as pd
 from decimal import Decimal, InvalidOperation, getcontext
 from tabulate import tabulate
@@ -7,9 +8,13 @@ from reportlab.platypus import (
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet
+from pathlib import Path
 
 
 YEAR = 2024 # Anno a cui si riferiscono le transazioni
+
+# folder where this file lives:
+BASE_DIR = Path(__file__).parent
 
 # — set max precision high enough for all your CSV values —
 getcontext().prec = 50
@@ -105,46 +110,71 @@ def get_assets(dataframe):
 
 def get_daily_asset_balances(dataframe):
     """
-    Per ogni asset presente in 'df' restituisce una Serie indicizzata sui
-    giorni dell'anno con la giacenza cumulativa calcolata giorno per giorno.
+    Per ogni asset presente in 'dataframe' restituisce un DataFrame indicizzato sui
+    giorni dell'anno con tre colonne:
+    - 'Date': la data normalizzata (senza ora/minuti/secondi)
+    - 'Balance': la giacenza cumulativa calcolata giorno per giorno
+    - 'Controvalore': il valore in EUR della giacenza giornaliera, basato sul prezzo
     """
-    # --- preparazione colonne utili ----------------------------------
+    # normalizzo Timestamp → Date e Quantity, con sell = negative
     df = dataframe.copy()
-    df["Timestamp"] = pd.to_datetime(df["Timestamp"], utc=True, errors="coerce")
-    df["Date"] = df["Timestamp"].dt.normalize()           # tronco a mezzanotte
-    df["Quantity Transacted"] = pd.to_numeric(
-        df["Quantity Transacted"], errors="coerce"
+    df['Date'] = (
+        pd.to_datetime(df['Timestamp'], utc=True)
+          .dt.normalize()
+    )
+    df['Quantity Transacted'] = (
+        pd.to_numeric(df['Quantity Transacted'], errors='coerce')
     )
 
     # invertiamo le quantità per tutte le transaction types che contengono "sell"
-    sell_mask = df["Transaction Type"].str.lower().str.contains("sell", na=False)
-    df.loc[sell_mask, "Quantity Transacted"] *= -1
-
+    sell = df['Transaction Type'].str.lower().str.contains('sell', na=False)
+    df.loc[sell, 'Quantity Transacted'] *= -1
+    
     # TODO: vanno gestitie eventuali tipi di transazione al momento non note
 
-    # calendario completo dell'anno                                   
-    calendar = pd.date_range(f"{YEAR}-01-01", f"{YEAR}-12-31", freq="D", tz="UTC")
-    
-    balances = {}
-    for asset, g in df.groupby("Asset"):
-        # sommo le transazioni avvenute lo stesso giorno
-        daily_delta = g.groupby("Date")["Quantity Transacted"].sum()
-        # "esplodo" i giorni mancanti riempiendoli di 0
-        daily_delta = daily_delta.reindex(calendar, fill_value=0)
-        # running total → giacenza giorno per giorno
-        balances[asset] = daily_delta.cumsum()
-    
-    return balances
+    # calendario dell'anno (assumo YEAR e BASE_DIR definiti a livello di modulo)
+    dates = pd.date_range(f"{YEAR}-01-01", f"{YEAR}-12-31", freq='D', tz='UTC')
+
+    out = {}
+    for asset, grp in df.groupby('Asset'):
+        # cumulativi dei delta giornalieri
+        balance = (
+            grp.groupby('Date')['Quantity Transacted']
+               .sum()
+               .reindex(dates, fill_value=0)
+               .cumsum()
+        )
+
+        # quotazioni EUR forward‑filled
+        price_df = pd.read_csv(
+            Path(BASE_DIR) / 'data' / f"{asset.lower()}_prices_{YEAR}.csv",
+            parse_dates=['Date'], index_col='Date'
+        )['Price']
+        prices = (
+            price_df
+              .tz_localize('UTC')
+              .reindex(dates, method='ffill')
+        )
+
+        # DataFrame con le 3 colonne richieste
+        out[asset] = pd.DataFrame({
+            'Date':         dates,
+            'Balance':      balance.values,
+            'Controvalore': balance.values * prices.values
+        })
+
+    return out
 
 def print_daily_asset_balances(balances):
     """
-    Stampa le giacenze giornaliere per ogni asset in formato tabellare.
-    
-    :param balances: dizionario con giacenze giornaliere per asset
+    Stampa le giacenze giornaliere e il relativo controvalore per ogni asset.
+
+    :param balances: dict[str, pd.DataFrame] con colonne ['Date', 'Balance', 'Controvalore']
     """
-    for asset, balance in balances.items():
-        print(f"Asset: {asset}")
-        print(tabulate(balance.items(), headers=["Date", "Balance"], tablefmt="psql"))
+    for asset, df in balances.items():
+        print(f"\nAsset: {asset}")
+        # tabulate su DataFrame, senza mostrare l'indice (Date è colonna)
+        print(tabulate(df, headers="keys", tablefmt="psql", showindex=False))
 
 def calculate_taxes(df):
     """
@@ -159,7 +189,7 @@ def calculate_taxes(df):
     # ... logica di calcolo ...
     return results
 
-def generate_report(results: dict[str, pd.Series],
+def generate_report_original(results: dict[str, pd.Series],
                     df_tx: pd.DataFrame | None = None,
                     output_path: str = f"report_crypto_{YEAR + 1}.pdf"):
     """
@@ -247,8 +277,102 @@ def generate_report(results: dict[str, pd.Series],
     doc.build(story)
     print(f"Report generato in: {output_path}")
 
+def generate_report(results: dict[str, pd.DataFrame],
+                    df_tx: pd.DataFrame | None = None,
+                    output_path: str = f"report_crypto_{YEAR + 1}.pdf"):
+    """
+    Crea un PDF con:
+      • saldo giorno-per-giorno di ogni asset (Balance e Controvalore)
+      • giacenza media annua
+      • plusvalenza stimata
+    :param results:  dict {asset: DataFrame con colonne ['Date','Balance','Controvalore']}
+    :param df_tx:    DataFrame originale delle transazioni (per ricavare il prezzo ultimo)
+    :param output_path: path del file PDF in uscita
+    """
+    # Preparazione document
+    doc   = SimpleDocTemplate(output_path, pagesize=A4)
+    story = []
+    styles = getSampleStyleSheet()
+    h1, h2, normal = styles["Heading1"], styles["Heading2"], styles["BodyText"]
 
+    # HEADER
+    story.append(Paragraph(f"REPORT FISCALE CRYPTO {YEAR + 1}", h1))
+    story.append(Paragraph(f"Riferito alle attività del {YEAR}", h2))
+    story.append(Spacer(1, 12))
 
+    # riepilogo finale
+    summary_rows = []
+
+    for asset, df_bal in results.items():
+        story.append(Paragraph(asset, h2))
+
+        # ultimo prezzo da df_tx (se disponibile)
+        last_price = None
+        if df_tx is not None:
+            sel = df_tx.loc[df_tx["Asset"] == asset, "Price at Transaction"]
+            if not sel.empty:
+                last_price = pd.to_numeric(sel, errors="coerce").dropna().iloc[-1]
+
+        # -- Preparo la tabella completa con Balance e Controvalore
+        # Assicuro che 'Date' sia stringa formattata
+        df_display = df_bal.copy()
+        df_display["Date"] = pd.to_datetime(df_display["Date"], utc=True)\
+                                  .dt.strftime("%Y-%m-%d")
+        # colonne in ordine desiderato
+        cols = ["Date", "Balance", "Controvalore"]
+        #table_data = [cols] + df_display[cols].values.tolist()
+        #story.append(_make_table(table_data, cols))
+        rows = df_display[cols].values.tolist()
+        story.append(_make_table(rows, cols))
+        story.append(Spacer(1, 18))
+
+        # saldo al 31/12
+        mask_31 = df_bal["Date"].dt.date == datetime.date(YEAR, 12, 31)
+        if mask_31.any():
+            eoy_bal = df_bal.loc[mask_31, "Balance"].iloc[0]
+            story.append(Paragraph(f"Giacenza al 31/12/{YEAR}: <b>{eoy_bal:,.8f} {asset}</b>",normal))
+            eoy_con = df_bal.loc[mask_31, "Controvalore"].iloc[0]
+            story.append(Paragraph(f"Controvalore al 31/12/{YEAR}: <b>{eoy_con:,.2f} EUR</b>",normal))
+        else:
+            story.append(Paragraph(f"Giacenza al 31/12/{YEAR}: <i>nessun dato per il 31/12</i>",normal))
+            story.append(Paragraph(f"Controvalore al 31/12/{YEAR}: <i>nessun dato per il 31/12</i>",normal))
+ 
+         # -- metriche di sintesi sulla colonna 'Balance'
+        avg_bal, gain_eur = _compute_summary(df_bal["Balance"], last_price)
+        story.append(Paragraph(f"Giacenza media annua: <b>{avg_bal:,.8f} {asset}</b>", normal))
+
+        if last_price is not None:
+            story.append(Paragraph(f"Plusvalenza stimata: <b>{gain_eur:,.2f} €</b>", normal))
+        else:
+            story.append(Paragraph("Plusvalenza stimata: <i>prezzo mancante - non calcolata</i>", normal))
+        story.append(Spacer(1, 12))
+        story.append(PageBreak())
+
+        summary_rows.append([
+            asset,
+            f"{avg_bal:,.8f}",
+            f"{gain_eur:,.2f}" if last_price is not None else "n/d"
+        ])
+
+    # RIEPILOGO FINALE
+    story.append(Paragraph("Riepilogo annuale", h2))
+    story.append(_make_table(
+        [["Asset", "Giacenza media", "Plusvalenza (€)"]] + summary_rows,
+        ["Asset", "Giacenza media", "Plusvalenza (€)"],
+        h_align="CENTER"
+    ))
+    story.append(Spacer(1, 12))
+    story.append(Paragraph(
+        "NB: la plusvalenza è calcolata come differenza di quantità "
+        "tra 1 gennaio e 31 dicembre moltiplicata per l'ultimo prezzo disponibile "
+        "nel file CSV. Se desideri il calcolo FIFO/LIFO delle plusvalenze realizzate, "
+        "occorre un'analisi più approfondita delle singole operazioni di vendita.",
+        normal
+    ))
+
+    # BUILD
+    doc.build(story)
+    print(f"Report generato in: {output_path}")
 
 def _compute_summary(series: pd.Series, last_price: float | None) -> tuple[float, float]:
     """

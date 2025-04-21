@@ -35,6 +35,7 @@ def main():
     print("\n\n\n▶ Asset trovati:", assets)
 
     daily_asset_balances = rules.get_daily_asset_balances(data)
+    
     print("\n\n\n▶ Saldo giornaliero per asset:")
     rules.print_daily_asset_balances(daily_asset_balances)
 
