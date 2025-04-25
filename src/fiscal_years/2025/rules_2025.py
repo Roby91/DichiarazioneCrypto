@@ -1,4 +1,5 @@
 import datetime
+import decimal
 import pandas as pd
 from decimal import Decimal, InvalidOperation, getcontext
 from tabulate import tabulate
@@ -92,7 +93,7 @@ def print_formatted_table(dataframe, num_rows=10):
 
     to_print = dataframe[columns_to_print].head(num_rows).copy()
 
-    # Per ogni colonna Decimal, sostituisci l’oggetto con la sua repr testuale
+    # Per ogni colonna Decimal, sostituisci l'oggetto con la sua rappresentazione testuale
     for c in ["Quantity Transacted", "Price at Transaction", "Total (inclusive of fees and/or spread)"]:
         to_print[c] = to_print[c].apply(lambda x: str(x) if isinstance(x, Decimal) else x)
 
@@ -111,8 +112,9 @@ def get_assets(dataframe):
 def get_daily_asset_balances(dataframe):
     """
     Per ogni asset presente in 'dataframe' restituisce un DataFrame indicizzato sui
-    giorni dell'anno con tre colonne:
+    giorni dell'anno con quattro colonne:
     - 'Date': la data normalizzata (senza ora/minuti/secondi)
+    - 'Price': il prezzo in EUR dell'asset (forward filled)
     - 'Balance': la giacenza cumulativa calcolata giorno per giorno
     - 'Controvalore': il valore in EUR della giacenza giornaliera, basato sul prezzo
     """
@@ -156,9 +158,10 @@ def get_daily_asset_balances(dataframe):
               .reindex(dates, method='ffill')
         )
 
-        # DataFrame con le 3 colonne richieste
+        # DataFrame con le 4 colonne
         out[asset] = pd.DataFrame({
             'Date':         dates,
+            'Price':        prices.values,
             'Balance':      balance.values,
             'Controvalore': balance.values * prices.values
         })
@@ -169,7 +172,7 @@ def print_daily_asset_balances(balances):
     """
     Stampa le giacenze giornaliere e il relativo controvalore per ogni asset.
 
-    :param balances: dict[str, pd.DataFrame] con colonne ['Date', 'Balance', 'Controvalore']
+    :param balances: dict[str, pd.DataFrame] con colonne ['Date', 'Price', 'Balance', 'Controvalore']
     """
     for asset, df in balances.items():
         print(f"\nAsset: {asset}")
@@ -315,9 +318,64 @@ def generate_report(results: dict[str, pd.DataFrame],
 
         # -- Preparo la tabella completa con Balance e Controvalore
         # Assicuro che 'Date' sia stringa formattata
+        # Get the first day of the year value before converting to string
+        first_day = df_bal[df_bal['Date'].dt.date == datetime.date(YEAR, 1, 1)]
+
+        # ---------------------------------------------------------------------
+        # Quadro W: calcolo valore iniziale/finale (unità + controvalore EUR)
+        # ---------------------------------------------------------------------
+        valore_iniziale = valore_iniziale_controvalore = None
+        valore_finale   = valore_finale_controvalore   = None
+
+        if df_tx is not None:
+            tx = df_tx[df_tx["Asset"] == asset].copy()
+            if not tx.empty:
+                # uniformo timestamp
+                tx["Timestamp"] = pd.to_datetime(tx["Timestamp"], utc=True)
+                tx_year = tx[tx["Timestamp"].dt.year == YEAR]
+
+                # -- VALORE INIZIALE --
+                if not first_day.empty and first_day["Balance"].iloc[0] != 0:
+                    # già saldo al 1° gennaio
+                    valore_iniziale = first_day["Balance"].iloc[0]
+                    valore_iniziale_controvalore = first_day["Controvalore"].iloc[0]
+                else:
+                    # primo acquisto (Quantity Transacted > 0)
+                    qty = pd.to_numeric(tx_year["Quantity Transacted"], errors="coerce")
+                    ingoing = tx_year[tx_year["Transaction Type"].str.lower().str.contains("buy|in")]
+                    if not ingoing.empty:
+                        first_tx = ingoing.sort_values("Timestamp").iloc[0]
+                        d0 = first_tx["Timestamp"].date()
+                        row0 = df_bal[df_bal["Date"].dt.date == d0]
+                        if not row0.empty:
+                            valore_iniziale = first_tx["Quantity Transacted"]
+                            # per coerenza utilizzo il tasso di cambio dal file statico
+                            valore_iniziale_controvalore = abs(first_tx["Quantity Transacted"] * decimal.Decimal(float(row0["Price"].iloc[0])))
+
+                # -- VALORE FINALE --
+                qty = pd.to_numeric(tx_year["Quantity Transacted"], errors="coerce")
+                outgoing = tx_year[tx_year["Transaction Type"].str.lower().str.contains("sell|withdraw|out")]
+                if not outgoing.empty:
+                    last_tx = outgoing.sort_values("Timestamp").iloc[-1]
+                    d1 = last_tx["Timestamp"].date()
+                    row1 = df_bal[df_bal["Date"].dt.date == d1]
+                    if not row1.empty:
+                        valore_finale = last_tx["Quantity Transacted"]
+                        # per coerenza utilizzo il tasso di cambio dal file statico
+                        valore_finale_controvalore = abs(last_tx["Quantity Transacted"] * decimal.Decimal(float(row1["Price"].iloc[0])))
+
+
+        # fallback: se nessuna uscita, prendo 31/12
+        if valore_finale is None:
+            mask_eoy = df_bal["Date"].dt.date == datetime.date(YEAR, 12, 31)
+            if mask_eoy.any():
+                valore_finale = df_bal.loc[mask_eoy, "Balance"].iloc[0]
+                valore_finale_controvalore = df_bal.loc[mask_eoy, "Controvalore"].iloc[0]
+        # ---------------------------------------------------------------------
+
+        # Now convert Date to string format for display
         df_display = df_bal.copy()
-        df_display["Date"] = pd.to_datetime(df_display["Date"], utc=True)\
-                                  .dt.strftime("%Y-%m-%d")
+        df_display["Date"] = pd.to_datetime(df_display["Date"], utc=True).dt.strftime("%Y-%m-%d")
         # colonne in ordine desiderato
         cols = ["Date", "Balance", "Controvalore"]
         #table_data = [cols] + df_display[cols].values.tolist()
@@ -325,6 +383,13 @@ def generate_report(results: dict[str, pd.DataFrame],
         rows = df_display[cols].values.tolist()
         story.append(_make_table(rows, cols))
         story.append(Spacer(1, 18))
+
+        if not first_day.empty:
+            story.append(Paragraph(f"Giacenza al 01/01/{YEAR}: <b>{first_day['Balance'].iloc[0]:,.8f} {asset}</b>",normal))
+            story.append(Paragraph(f"Controvalore al 01/01/{YEAR}: <b>{first_day['Controvalore'].iloc[0]:,.2f} EUR</b>",normal))
+        else:
+            story.append(Paragraph(f"Giacenza al 01/01/{YEAR}: <i>nessun dato per il 01/01</i>",normal))
+            story.append(Paragraph(f"Controvalore al 01/01/{YEAR}: <i>nessun dato per il 01/01</i>",normal))
 
         # saldo al 31/12
         mask_31 = df_bal["Date"].dt.date == datetime.date(YEAR, 12, 31)
@@ -337,7 +402,11 @@ def generate_report(results: dict[str, pd.DataFrame],
             story.append(Paragraph(f"Giacenza al 31/12/{YEAR}: <i>nessun dato per il 31/12</i>",normal))
             story.append(Paragraph(f"Controvalore al 31/12/{YEAR}: <i>nessun dato per il 31/12</i>",normal))
  
-         # -- metriche di sintesi sulla colonna 'Balance'
+        story.append(Paragraph(f"Valore iniziale *: <b>{valore_iniziale_controvalore:,.2f} EUR</b>",normal))
+        story.append(Paragraph(f"Valore finale *: <b>{valore_finale_controvalore:,.2f} EUR</b>",normal))
+
+        
+        # -- metriche di sintesi sulla colonna 'Balance'
         avg_bal, gain_eur = _compute_summary(df_bal["Balance"], last_price)
         story.append(Paragraph(f"Giacenza media annua: <b>{avg_bal:,.8f} {asset}</b>", normal))
 
@@ -346,13 +415,38 @@ def generate_report(results: dict[str, pd.DataFrame],
         else:
             story.append(Paragraph("Plusvalenza stimata: <i>prezzo mancante - non calcolata</i>", normal))
         story.append(Spacer(1, 12))
-        story.append(PageBreak())
+        
+        #story.append(PageBreak())
 
         summary_rows.append([
             asset,
             f"{avg_bal:,.8f}",
             f"{gain_eur:,.2f}" if last_price is not None else "n/d"
         ])
+
+        story.append(Spacer(1, 22))
+
+        text = (
+            "<b>* Quadro W del Modello 730/2025</b>: i campi “<b>valore iniziale</b>” e “<b>valore finale</b>” "
+            "si riferiscono al valore complessivo delle criptovalute detenute, non al valore unitario di ciascuna. "
+            "Pertanto, anche se hai acquistato frazioni (es. 0,1 Bitcoin), devi indicare il valore totale di quella frazione."
+            "<br/><br/>"
+            "<b>Valore iniziale:</b><br/>"
+            "&#8226; Se l'attività era già detenuta al <b>1 gennaio 2024</b>: indica il valore di mercato dell'asset a quella data.<br/>"
+            "&#8226; Se l'attività è stata acquisita durante il 2024: indica il valore di mercato al momento del primo acquisto.<br/>"
+            "Il valore deve essere espresso in <b>euro</b>, usando il tasso di cambio ufficiale alla data di riferimento se l'attività è denominata in valuta estera."
+            "<br/><br/>"
+            "<b>Valore finale:</b><br/>"
+            "&#8226; Se l'attività è ancora detenuta al <b>31 dicembre 2024</b>: indica il valore di mercato dell'asset a quella data.<br/>"
+            "&#8226; Se l'attività è stata completamente venduta o dismessa durante il 2024: indica il valore di mercato al momento dell'ultima vendita o dismissione.<br/>"
+            "Anche in questo caso, il valore deve essere espresso in <b>euro</b>, utilizzando il tasso di cambio ufficiale alla data di riferimento se necessario."
+        )
+
+        story.append(Paragraph(text, normal))
+
+        story.append(Spacer(1, 22))
+
+
 
     # RIEPILOGO FINALE
     story.append(Paragraph("Riepilogo annuale", h2))

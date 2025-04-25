@@ -45,8 +45,7 @@ def main():
 
     # Genera un report
     if args.output:
-        #rules.generate_report(results, daily_asset_balances, output_path=args.output)
-        rules.generate_report(daily_asset_balances, None, output_path=args.output)
+        rules.generate_report(daily_asset_balances, data, output_path=args.output)
         print(f"✅ Report generato: {args.output}")
     else:
         print("▶ Risultati calcolo:", results)
